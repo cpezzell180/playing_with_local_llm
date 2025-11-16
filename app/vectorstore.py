@@ -200,6 +200,94 @@ def query_top_k(
         raise RuntimeError(f"Error querying vector store: {e}")
 
 
+def query_multi_topic(
+    query: str,
+    topics: List[str],
+    top_k: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """
+    Query the vector store for multiple topics, ensuring diverse results across topics.
+    
+    This function retrieves chunks for each topic independently and combines them,
+    ensuring representation from all topics rather than having one dominant topic.
+    
+    Args:
+        query: Original query string (for logging)
+        topics: List of topic strings to query independently
+        top_k: Total number of results to return (defaults to settings.top_k)
+        
+    Returns:
+        List of dictionaries containing chunks from all topics, deduplicated
+    """
+    if top_k is None:
+        top_k = settings.top_k
+    
+    if not topics:
+        logger.warning("No topics provided for multi-topic query, falling back to single query")
+        return query_top_k(query, top_k)
+    
+    logger.info(f"Multi-topic query with {len(topics)} topics: {topics}")
+    
+    try:
+        # Calculate chunks per topic (distribute evenly)
+        chunks_per_topic = max(1, top_k // len(topics))
+        
+        # Retrieve chunks for each topic
+        all_results = []
+        seen_chunks = set()  # Track unique chunks by text hash
+        
+        collection = get_collection()
+        
+        for topic in topics:
+            # Generate embedding for this topic
+            topic_embedding = embed_query(topic)
+            
+            # Query for this topic
+            results = collection.query(
+                query_embeddings=[topic_embedding],
+                n_results=chunks_per_topic
+            )
+            
+            # Parse results
+            documents = results.get("documents", [[]])[0]
+            metadatas = results.get("metadatas", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+            
+            # Add unique results
+            for doc, meta, dist in zip(documents, metadatas, distances):
+                # Use text hash for deduplication
+                chunk_hash = hash(doc)
+                if chunk_hash not in seen_chunks:
+                    seen_chunks.add(chunk_hash)
+                    result_dict = {
+                        "text": doc,
+                        "doc_id": meta.get("doc_id", "unknown"),
+                        "source": meta.get("source", "unknown"),
+                        "distance": dist
+                    }
+                    # Add image path if present
+                    if "image_path" in meta:
+                        result_dict["image_path"] = meta["image_path"]
+                    all_results.append(result_dict)
+            
+            logger.debug(f"Retrieved {len(documents)} chunks for topic: '{topic[:50]}...'")
+        
+        # Sort by distance (ascending - lower is better)
+        all_results.sort(key=lambda x: x["distance"])
+        
+        # Limit to top_k
+        final_results = all_results[:top_k]
+        
+        logger.info(f"Multi-topic query returned {len(final_results)} unique chunks from {len(topics)} topics")
+        return final_results
+        
+    except Exception as e:
+        logger.error(f"Error in multi-topic query: {e}")
+        # Fallback to single query
+        logger.warning("Falling back to single query")
+        return query_top_k(query, top_k)
+
+
 def get_collection_stats() -> Dict[str, Any]:
     """
     Get statistics about the collection.

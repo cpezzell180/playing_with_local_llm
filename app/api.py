@@ -12,7 +12,7 @@ import mimetypes
 
 from app.config import settings
 from app.ingestion import ingest_files, ingest_url, refresh_url_content
-from app.vectorstore import query_top_k, get_collection_stats, clear_collection, list_files, delete_file_by_source
+from app.vectorstore import query_top_k, query_multi_topic, get_collection_stats, clear_collection, list_files, delete_file_by_source
 from app.llm import generate_answer
 from app.conversations import ConversationStore
 from app.token_manager import build_prompt_with_budget
@@ -124,6 +124,87 @@ class RefreshUrlResponse(BaseModel):
     total_chunks: int = Field(..., description="Number of chunks created")
     last_fetched: Optional[str] = Field(None, description="ISO timestamp of when content was fetched")
     error: Optional[str] = Field(None, description="Error message if failed")
+
+
+def extract_topics_from_query(query: str) -> Optional[List[str]]:
+    """
+    Extract multiple topics from a query if it spans multiple subjects.
+    
+    Detects queries that ask about multiple distinct topics using patterns like:
+    - "compare X and Y"
+    - "X and Y"
+    - "both X and Y"
+    - "X versus Y"
+    - "difference between X and Y"
+    
+    Args:
+        query: User query string
+        
+    Returns:
+        List of topic strings if multiple topics detected, None otherwise
+    """
+    query_lower = query.lower()
+    
+    # Multi-topic indicator patterns
+    multi_topic_patterns = [
+        (" and ", " compare ", " versus ", " vs ", " both ", 
+         " difference between ", " similarities between ", " contrast ")
+    ]
+    
+    # Check if query contains multi-topic indicators
+    has_multi_topic = any(pattern in query_lower for patterns in multi_topic_patterns for pattern in patterns)
+    
+    if not has_multi_topic:
+        return None
+    
+    # Simple topic extraction based on common patterns
+    topics = []
+    
+    # Pattern: "compare X and Y"
+    if "compare" in query_lower:
+        # Extract topics after "compare" and split by "and"
+        parts = query_lower.split("compare", 1)
+        if len(parts) > 1:
+            remaining = parts[1].strip()
+            # Remove common question words
+            for word in [" - ", " what ", " how ", " why ", " where ", " when ", "?"]:
+                remaining = remaining.replace(word, " ")
+            # Split by "and"
+            if " and " in remaining:
+                topic_parts = remaining.split(" and ")
+                for part in topic_parts[:2]:  # Limit to 2 topics
+                    topic = part.strip().rstrip(".,!?")
+                    if topic and len(topic) > 2:
+                        topics.append(topic)
+    
+    # Pattern: "X and Y" (general)
+    elif " and " in query_lower:
+        # Split by "and" and take up to 2 parts
+        parts = query_lower.split(" and ")
+        if len(parts) >= 2:
+            # Extract the last word/phrase before "and" from first part
+            first_part = parts[0].strip().split()[-3:]  # Last 3 words
+            first_topic = " ".join(first_part).strip()
+            
+            # Extract the first word/phrase after "and" from second part
+            second_part = parts[1].strip().split()[:3]  # First 3 words
+            second_topic = " ".join(second_part).strip()
+            
+            # Clean up
+            for topic in [first_topic, second_topic]:
+                topic = topic.rstrip(".,!?")
+                # Remove question words
+                for qword in ["what", "how", "tell", "about", "is", "are", "do"]:
+                    topic = topic.replace(qword + " ", "").strip()
+                if topic and len(topic) > 2:
+                    topics.append(topic)
+    
+    # Return topics if we found at least 2 distinct ones
+    if len(topics) >= 2:
+        logger.info(f"Detected multi-topic query. Topics: {topics}")
+        return topics[:2]  # Limit to 2 topics for now
+    
+    return None
 
 
 # System prompt for the LLM
@@ -507,7 +588,17 @@ def ask_question(request: AskRequest):
         
         # Retrieve relevant chunks from vector store (RAG - only on current query)
         top_k = request.top_k if request.top_k is not None else settings.top_k
-        results = query_top_k(request.query, top_k=top_k)
+        
+        # Detect if query spans multiple topics
+        topics = extract_topics_from_query(request.query)
+        
+        if topics:
+            # Multi-topic query: retrieve chunks for each topic independently
+            logger.info(f"Using multi-topic retrieval for topics: {topics}")
+            results = query_multi_topic(request.query, topics, top_k=top_k)
+        else:
+            # Single-topic query: use standard retrieval
+            results = query_top_k(request.query, top_k=top_k)
         
         if not results:
             logger.warning("No relevant documents found")
