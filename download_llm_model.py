@@ -54,8 +54,7 @@ def download_llm_model(
             repo_id=model_id,
             filename=filename,
             cache_dir=str(output_path.absolute()),
-            local_dir=str(output_path.absolute()),
-            local_dir_use_symlinks=False
+            local_dir=str(output_path.absolute())
         )
         
         print(f"\n✓ Model downloaded successfully!")
