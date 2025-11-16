@@ -43,7 +43,7 @@ RUN mkdir -p ./data/uploads ./data/chroma ./data/images ./models ./models/senten
 # Download embedding model (sentence-transformers/all-MiniLM-L6-v2)
 # This will cache the model in ./models/sentence-transformers/
 RUN echo "Downloading embedding model..." && \
-    python download_embedding_model.py --output-dir ./models/sentence-transformers
+    python download_embedding_model.py --cache-dir ./models/sentence-transformers
 
 # Download Mistral 7B Instruct v0.2 Q4_K_M (~4.4GB)
 # This is the best 8B-class model: high quality, publicly accessible
