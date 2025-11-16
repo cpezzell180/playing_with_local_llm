@@ -1,7 +1,8 @@
 """Document ingestion and text extraction."""
 import logging
+import shutil
 from pathlib import Path
-from typing import List, Dict, Any, Iterable, Set, Tuple
+from typing import List, Dict, Any, Iterable, Set, Tuple, Optional
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
@@ -190,6 +191,43 @@ def extract_text_from_excel(file_path: Path) -> str:
         return "\n".join(text_parts)
     except Exception as e:
         logger.error(f"Error extracting text from Excel {file_path}: {e}")
+        raise
+
+
+def save_image_file(image_path: Path, doc_id: str, image_index: int = 0) -> str:
+    """
+    Save an image file to the configured image directory with a unique name.
+    
+    Args:
+        image_path: Path to the original image file
+        doc_id: Logical document ID (used for unique naming)
+        image_index: Index for multiple images from same document (default: 0)
+        
+    Returns:
+        Relative path to the saved image (relative to data directory)
+    """
+    try:
+        # Get image extension
+        extension = image_path.suffix.lower()
+        
+        # Create unique filename: doc_id_index.ext
+        # Replace any path separators in doc_id to avoid directory issues
+        safe_doc_id = doc_id.replace("/", "_").replace("\\", "_").replace(":", "_")
+        image_filename = f"{safe_doc_id}_{image_index}{extension}"
+        
+        # Full path to save location
+        save_path = Path(settings.image_dir) / image_filename
+        
+        # Copy image to storage directory
+        shutil.copy2(image_path, save_path)
+        
+        logger.debug(f"Saved image: {image_filename}")
+        
+        # Return relative path (for storage in metadata)
+        return str(save_path.relative_to(settings.data_dir))
+        
+    except Exception as e:
+        logger.error(f"Error saving image {image_path}: {e}")
         raise
 
 
@@ -477,6 +515,10 @@ def ingest_files(
     all_texts = []
     all_doc_ids = []
     all_sources = []
+    all_image_paths = []  # Track image paths for each chunk
+    
+    # Image file extensions
+    image_extensions = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
     
     for idx, file_path in enumerate(file_paths):
         try:
@@ -508,10 +550,22 @@ def ingest_files(
             doc_id = f"{logical_doc_id_prefix}:{idx}"
             source = file_path.name
             
+            # Check if this is an image file - if so, save it
+            image_path = None
+            if file_path.suffix.lower() in image_extensions:
+                try:
+                    image_path = save_image_file(file_path, doc_id, image_index=0)
+                    logger.info(f"Saved image for {file_path.name}: {image_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save image {file_path.name}: {e}")
+                    # Continue processing even if image save fails
+            
             # Collect chunks
             all_texts.extend(chunks)
             all_doc_ids.extend([doc_id] * len(chunks))
             all_sources.extend([source] * len(chunks))
+            # Associate image path with all chunks from this image (or None for non-images)
+            all_image_paths.extend([image_path] * len(chunks))
             
             total_chunks += len(chunks)
             success_count += 1
@@ -529,7 +583,7 @@ def ingest_files(
     # Add all chunks to vector store
     if all_texts:
         try:
-            add_chunks(all_texts, all_doc_ids, all_sources)
+            add_chunks(all_texts, all_doc_ids, all_sources, image_paths=all_image_paths)
             logger.info(f"Added {len(all_texts)} chunks to vector store")
         except Exception as e:
             logger.error(f"Failed to add chunks to vector store: {e}")

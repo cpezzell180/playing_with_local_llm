@@ -69,7 +69,8 @@ def add_chunks(
     texts: List[str],
     doc_ids: List[str],
     sources: List[str],
-    upload_date: Optional[str] = None
+    upload_date: Optional[str] = None,
+    image_paths: Optional[List[Optional[str]]] = None
 ) -> None:
     """
     Add document chunks to the vector store.
@@ -79,6 +80,7 @@ def add_chunks(
         doc_ids: List of logical document IDs for each chunk
         sources: List of source file paths/names for each chunk
         upload_date: ISO format upload timestamp (defaults to current time)
+        image_paths: Optional list of image file paths associated with each chunk (None for text-only chunks)
         
     Raises:
         ValueError: If input lists have different lengths
@@ -91,6 +93,11 @@ def add_chunks(
     if not (len(texts) == len(doc_ids) == len(sources)):
         raise ValueError(
             f"Length mismatch: texts={len(texts)}, doc_ids={len(doc_ids)}, sources={len(sources)}"
+        )
+    
+    if image_paths is not None and len(image_paths) != len(texts):
+        raise ValueError(
+            f"Length mismatch: texts={len(texts)}, image_paths={len(image_paths)}"
         )
     
     # Use current timestamp if not provided
@@ -107,10 +114,13 @@ def add_chunks(
         chunk_ids = [f"{doc_id}_chunk_{i}" for i, doc_id in enumerate(doc_ids)]
         
         # Build metadata for each chunk
-        metadatas = [
-            {"doc_id": doc_id, "source": source, "upload_date": upload_date}
-            for doc_id, source in zip(doc_ids, sources)
-        ]
+        metadatas = []
+        for i, (doc_id, source) in enumerate(zip(doc_ids, sources)):
+            metadata = {"doc_id": doc_id, "source": source, "upload_date": upload_date}
+            # Add image path if provided for this chunk
+            if image_paths and image_paths[i]:
+                metadata["image_path"] = image_paths[i]
+            metadatas.append(metadata)
         
         # Add to collection
         collection = get_collection()
@@ -145,6 +155,7 @@ def query_top_k(
             - doc_id: logical document ID
             - source: source file path
             - distance: similarity distance
+            - image_path: path to associated image (optional, only if chunk has an image)
     """
     if top_k is None:
         top_k = settings.top_k
@@ -170,12 +181,16 @@ def query_top_k(
         # Build result list
         result_list = []
         for doc, meta, dist in zip(documents, metadatas, distances):
-            result_list.append({
+            result_dict = {
                 "text": doc,
                 "doc_id": meta.get("doc_id", "unknown"),
                 "source": meta.get("source", "unknown"),
                 "distance": dist
-            })
+            }
+            # Add image path if present in metadata
+            if "image_path" in meta:
+                result_dict["image_path"] = meta["image_path"]
+            result_list.append(result_dict)
         
         logger.debug(f"Retrieved {len(result_list)} results")
         return result_list

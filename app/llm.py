@@ -77,7 +77,8 @@ def generate_answer(
     prompt: str,
     system_prompt: Optional[str] = None,
     max_tokens: Optional[int] = None,
-    temperature: Optional[float] = None
+    temperature: Optional[float] = None,
+    estimated_prompt_tokens: Optional[int] = None
 ) -> str:
     """
     Generate an answer using the local LLM.
@@ -85,18 +86,18 @@ def generate_answer(
     Args:
         prompt: User prompt/question
         system_prompt: Optional system prompt for instructions
-        max_tokens: Maximum tokens to generate (defaults to settings)
+        max_tokens: Maximum tokens to generate (defaults to settings, adjusted for prompt size)
         temperature: Temperature for sampling (defaults to settings)
+        estimated_prompt_tokens: Estimated token count of the prompt (for dynamic max_tokens)
         
     Returns:
         str: Generated text response
     """
     llm = get_llm()
     
-    max_tokens = max_tokens or settings.llm_max_tokens
     temperature = temperature or settings.llm_temperature
     
-    # Build chat-style prompt based on model type
+    # Build chat-style prompt based on model type (do this before token calculation)
     if system_prompt:
         if _is_mistral_model():
             # Mistral 7B Instruct v0.2 format
@@ -117,6 +118,34 @@ def generate_answer(
     else:
         full_prompt = prompt
         stop_tokens = []
+    
+    # Calculate safe max_tokens based on ACTUAL full prompt size
+    if estimated_prompt_tokens is not None:
+        # Re-estimate based on the actual formatted prompt
+        from app.token_manager import estimate_tokens
+        actual_prompt_tokens = estimate_tokens(full_prompt)
+        
+        # Leave safety margin for tokenization differences
+        safety_margin = 50
+        available_tokens = settings.llm_context_size - actual_prompt_tokens - safety_margin
+        
+        # Use the smaller of: requested max_tokens or available tokens
+        requested_max = max_tokens or settings.llm_max_tokens
+        max_tokens = max(1, min(requested_max, available_tokens))
+        
+        logger.info(
+            f"Token allocation: estimated ~{estimated_prompt_tokens}, "
+            f"actual formatted ~{actual_prompt_tokens}, "
+            f"generation {max_tokens}, context_size {settings.llm_context_size}"
+        )
+        
+        if max_tokens < requested_max:
+            logger.warning(
+                f"Reduced max_tokens from {requested_max} to {max_tokens} "
+                f"to fit within context window"
+            )
+    else:
+        max_tokens = max_tokens or settings.llm_max_tokens
     
     logger.debug(f"Generating answer with max_tokens={max_tokens}, temperature={temperature}")
     

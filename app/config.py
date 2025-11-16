@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     data_dir: str = Field(default="./data", description="Base data directory")
     upload_dir: str = Field(default="./data/uploads", description="Document upload directory")
     vector_db_dir: str = Field(default="./data/chroma", description="ChromaDB storage directory")
+    image_dir: str = Field(default="./data/images", description="Extracted images storage directory")
     llm_model_path: str = Field(default="./models/llama-model.gguf", description="Path to .gguf model file")
     
     # LLM runtime configuration
@@ -79,6 +80,7 @@ class Settings(BaseSettings):
         Path(self.data_dir).mkdir(parents=True, exist_ok=True)
         Path(self.upload_dir).mkdir(parents=True, exist_ok=True)
         Path(self.vector_db_dir).mkdir(parents=True, exist_ok=True)
+        Path(self.image_dir).mkdir(parents=True, exist_ok=True)
         
         # Create models directory if it doesn't exist
         model_dir = Path(self.llm_model_path).parent

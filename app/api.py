@@ -8,11 +8,14 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+import mimetypes
 
 from app.config import settings
 from app.ingestion import ingest_files, ingest_url, refresh_url_content
 from app.vectorstore import query_top_k, get_collection_stats, clear_collection, list_files, delete_file_by_source
 from app.llm import generate_answer
+from app.conversations import ConversationStore
+from app.token_manager import build_prompt_with_budget
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +35,10 @@ static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+# Initialize conversation store
+# max_turns could be read from settings in the future: settings.MAX_CONVERSATION_TURNS
+conv_store = ConversationStore(max_turns=8)
+
 
 # Request/Response Models
 class UploadResponse(BaseModel):
@@ -46,6 +53,7 @@ class UploadResponse(BaseModel):
 
 class AskRequest(BaseModel):
     """Request model for question answering endpoint."""
+    conversation_id: Optional[str] = Field(None, description="Conversation ID for multi-turn interactions (optional)")
     query: str = Field(..., description="Question to answer")
     top_k: Optional[int] = Field(None, description="Number of chunks to retrieve (optional)")
 
@@ -53,6 +61,8 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     """Response model for question answering endpoint."""
     answer: str = Field(..., description="Generated answer")
+    conversation_id: str = Field(..., description="Conversation ID for this interaction")
+    images: List[str] = Field(default_factory=list, description="List of image URLs relevant to the answer")
 
 
 class StatsResponse(BaseModel):
@@ -193,6 +203,51 @@ def serve_manage_page():
         return FileResponse(html_file)
     else:
         raise HTTPException(status_code=404, detail="Manage page not found")
+
+
+@app.get("/images/{filename}")
+def serve_image(filename: str):
+    """
+    Serve an image file from the images directory.
+    
+    Args:
+        filename: Name of the image file to serve
+        
+    Returns:
+        FileResponse with the image file
+        
+    Raises:
+        HTTPException: If file not found or path is invalid
+    """
+    try:
+        # Security: Validate filename doesn't contain path traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        # Build full path
+        image_path = Path(settings.image_dir) / filename
+        
+        # Check if file exists
+        if not image_path.exists() or not image_path.is_file():
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        # Get MIME type
+        mime_type, _ = mimetypes.guess_type(str(image_path))
+        if mime_type is None:
+            mime_type = "application/octet-stream"
+        
+        # Return image file
+        return FileResponse(
+            path=str(image_path),
+            media_type=mime_type,
+            filename=filename
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving image {filename}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve image")
 
 
 @app.get("/documents/list", response_model=FileListResponse)
@@ -427,53 +482,126 @@ async def upload_documents(files: List[UploadFile] = File(...)):
 @app.post("/ask", response_model=AskResponse)
 def ask_question(request: AskRequest):
     """
-    Answer a question using RAG over ingested documents.
+    Answer a question using RAG over ingested documents with conversation memory.
     
     The endpoint:
-    1. Retrieves relevant document chunks from the vector store
-    2. Constructs a prompt with context and question
-    3. Calls the local LLM to generate an answer
-    4. Returns ONLY the answer (no context or internal details)
+    1. Determines conversation ID (uses provided or generates new UUID)
+    2. Retrieves conversation history for context
+    3. Retrieves relevant document chunks from the vector store (RAG)
+    4. Constructs a prompt with conversation history, context, and question
+    5. Calls the local LLM to generate an answer
+    6. Saves the user query and assistant answer to conversation history
+    7. Returns the answer with conversation ID for follow-up questions
     """
     if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     
-    logger.info(f"Processing question: {request.query[:100]}...")
+    # Determine conversation ID
+    conversation_id = request.conversation_id if request.conversation_id else str(uuid.uuid4())
+    
+    logger.info(f"Processing question (conv_id={conversation_id[:8]}...): {request.query[:100]}...")
     
     try:
-        # Retrieve relevant chunks
+        # Retrieve conversation history
+        history = conv_store.get_history(conversation_id)
+        
+        # Retrieve relevant chunks from vector store (RAG - only on current query)
         top_k = request.top_k if request.top_k is not None else settings.top_k
         results = query_top_k(request.query, top_k=top_k)
         
         if not results:
             logger.warning("No relevant documents found")
+            answer = "I don't have any documents to answer this question. Please upload documents first."
+            
+            # Save to conversation history even for no-docs response
+            conv_store.add_turn(conversation_id, "user", request.query)
+            conv_store.add_turn(conversation_id, "assistant", answer)
+            
             return AskResponse(
-                answer="I don't have any documents to answer this question. Please upload documents first."
+                answer=answer,
+                conversation_id=conversation_id
             )
         
-        # Build context from retrieved chunks
-        context_parts = []
-        for idx, result in enumerate(results, 1):
-            context_parts.append(f"[Document {idx}]\n{result['text']}")
+        # Build context from retrieved chunks and collect images
+        context_chunks = []
+        image_paths = []
+        for result in results:
+            context_chunks.append(result['text'])
+            # Collect image path if present
+            if 'image_path' in result and result['image_path']:
+                image_paths.append(result['image_path'])
         
-        context_str = "\n\n".join(context_parts)
+        # Convert image paths to URLs and deduplicate
+        image_urls = []
+        if image_paths:
+            # Deduplicate while preserving order
+            seen = set()
+            for img_path in image_paths:
+                if img_path not in seen:
+                    seen.add(img_path)
+                    # Extract just the filename from the path (e.g., "images/doc_0.png" -> "doc_0.png")
+                    filename = Path(img_path).name
+                    image_urls.append(f"/images/{filename}")
         
-        # Build user prompt with context and question
-        user_prompt = f"""Context from documents:
+        # Build enhanced system prompt with conversation awareness
+        enhanced_system_prompt = """You are a helpful assistant that answers questions based strictly on the provided context and prior conversation.
 
-{context_str}
-
-Question: {request.query}
-
-Answer:"""
+Rules:
+1. Answer ONLY using information from the context provided below and the conversation history
+2. **URL FORMATTING - CRITICAL:**
+   - When URLs appear in the context, format them as markdown links with MEANINGFUL, SPECIFIC text
+   - Use contextual link text that describes what the link is for
+   - Example: "You can access DIRRT at [the DIRRT portal](https://dirrt.ops.charter.com/home)"
+   - Example: "Submit requests via [DIRRT's request system](https://dirrt.ops.charter.com/requests)"
+   - NEVER use placeholder text: ❌ [Descriptive Text](URL) or [Access Here](URL) or [Tool Name](URL)
+   - NEVER use plain URLs: ❌ https://example.com
+   - NEVER use angle brackets: ❌ <https://example.com>
+   - NEVER reference documents by number: ❌ "Document 1", "Document 5", "Refer to Document X"
+   - Include URLs naturally in your sentences with meaningful link text
+3. If the question refers to previous conversation (e.g., "it", "that", "the previous"), use the conversation history to understand the reference
+4. If the answer cannot be found in the context, respond with "I don't know based on the provided documents"
+5. Format your answer using markdown for readability:
+   - Use **bold** for important terms, tool names, and key concepts
+   - Break down information into bullet points (-) when listing features or requirements
+   - Use numbered lists (1., 2., 3.) for sequential steps
+   - Add blank lines between sections
+6. Do not make up information or use external knowledge
+7. If the context is insufficient, acknowledge the limitation"""
+        
+        # Calculate available token budget
+        # Context window minus tokens reserved for generation
+        max_prompt_tokens = settings.llm_context_size - settings.llm_max_tokens
+        
+        # Build prompt with token budget management
+        system_prompt_final, user_prompt, estimated_tokens = build_prompt_with_budget(
+            system_prompt=enhanced_system_prompt,
+            user_query=request.query,
+            conversation_history=history,
+            context_chunks=context_chunks,
+            max_context_tokens=max_prompt_tokens
+        )
+        
+        logger.info(f"Prompt uses ~{estimated_tokens} tokens (budget: {max_prompt_tokens})")
         
         # Generate answer using local LLM
         logger.info("Generating answer with local LLM...")
-        answer = generate_answer(user_prompt, system_prompt=SYSTEM_PROMPT)
+        answer = generate_answer(
+            user_prompt, 
+            system_prompt=system_prompt_final,
+            estimated_prompt_tokens=estimated_tokens
+        )
         
         logger.info(f"Answer generated: {answer[:100]}...")
         
-        return AskResponse(answer=answer)
+        # Save conversation turns
+        conv_store.add_turn(conversation_id, "user", request.query)
+        conv_store.add_turn(conversation_id, "assistant", answer)
+        
+        return AskResponse(
+            answer=answer,
+            conversation_id=conversation_id,
+            images=image_urls
+        )
         
     except Exception as e:
         logger.error(f"Error processing question: {e}")

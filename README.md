@@ -399,11 +399,38 @@ curl -X POST "http://localhost:8000/ask" \
 **Response:**
 ```json
 {
-  "answer": "The main topic of the documents is..."
+  "answer": "The main topic of the documents is...",
+  "conversation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "images": [
+    "/images/batch123_0.png",
+    "/images/doc456_1.jpg"
+  ]
 }
 ```
 
-### 3. Get Statistics
+**Response fields:**
+- `answer`: The generated answer text (markdown formatted)
+- `conversation_id`: Unique ID for this conversation (use in follow-up questions)
+- `images`: Array of image URLs relevant to the answer (empty if no images)
+
+**Note:** When images are present, they are displayed automatically in the Web UI. You can access images directly at the returned URLs.
+
+### 3. View Images
+
+Images associated with answers can be accessed directly:
+
+```bash
+curl "http://localhost:8000/images/batch123_0.png" --output image.png
+```
+
+Or open in browser: `http://localhost:8000/images/batch123_0.png`
+
+**Features:**
+- Images are automatically served when referenced in answers
+- Click images in the UI to view full size
+- Supports: PNG, JPG, JPEG, TIF, TIFF formats
+
+### 4. Get Statistics
 
 Check how many documents are indexed:
 
@@ -564,14 +591,35 @@ curl -X POST "http://localhost:8000/documents/refresh-url/https%3A%2F%2Fexample.
 
 ## Supported File Formats
 
-| Category | Formats |
-|----------|---------|
-| Text | `.txt`, `.md` |
-| PDF | `.pdf` |
-| Microsoft Office | `.docx`, `.pptx`, `.xls`, `.xlsx` |
-| Web | `.html`, `.htm` |
-| Data | `.csv` |
-| Images (OCR) | `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff` |
+| Category | Formats | Notes |
+|----------|---------|-------|
+| Text | `.txt`, `.md` | Direct text extraction |
+| PDF | `.pdf` | Text extraction from PDF documents |
+| Microsoft Office | `.docx`, `.pptx`, `.xls`, `.xlsx` | Document content extraction |
+| Web | `.html`, `.htm` | HTML parsing and text extraction |
+| Data | `.csv` | Structured data extraction |
+| Images (OCR) | `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff` | **OCR text extraction + image display** |
+
+### Image Support
+
+The system provides **enhanced image support** with both OCR text extraction and visual display:
+
+**Features:**
+- **Text Extraction**: Uses Tesseract OCR to extract text from images
+- **Image Display**: Stores original images and displays them alongside answers
+- **Contextual Relevance**: Shows images when answering questions related to image content
+
+**Requirements:**
+- Tesseract OCR must be installed on your system:
+  - **macOS**: `brew install tesseract`
+  - **Linux**: `sudo apt-get install tesseract-ocr`
+  - **Windows**: Download from [GitHub](https://github.com/UB-Mannheim/tesseract/wiki)
+
+**How it works:**
+1. Upload an image (diagram, screenshot, form, etc.)
+2. System extracts text via OCR and stores the original image
+3. When you ask questions, relevant images are displayed with answers
+4. Click on images to view full size in a new tab
 
 ## Configuration Options
 
@@ -585,6 +633,7 @@ All settings are in `.env`:
 - `DATA_DIR`: Base data directory
 - `UPLOAD_DIR`: Where uploaded files are stored
 - `VECTOR_DB_DIR`: ChromaDB storage location
+- `IMAGE_DIR`: Where extracted/uploaded images are stored (default: `./data/images`)
 - `LLM_MODEL_PATH`: Path to .gguf model file
 
 ### LLM Runtime

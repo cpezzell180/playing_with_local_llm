@@ -244,6 +244,30 @@
             padding: 0;
         }
 
+        /* Image display styles */
+        .message-images {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .message-image {
+            max-width: 300px;
+            max-height: 300px;
+            border-radius: 8px;
+            border: 2px solid #3a3a3a;
+            cursor: pointer;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+            object-fit: contain;
+            background: #1a1a1a;
+        }
+
+        .message-image:hover {
+            transform: scale(1.05);
+            border-color: #4a9eff;
+        }
+
         .input-area {
             display: flex;
             gap: 10px;
@@ -452,7 +476,7 @@
                 const data = await response.json();
 
                 if (response.ok) {
-                    addMessage('assistant', data.answer);
+                    addMessage('assistant', data.answer, data.images || []);
                 } else {
                     throw new Error(data.detail || 'Failed to get answer');
                 }
@@ -465,7 +489,7 @@
         }
 
         // Add message to chat
-        function addMessage(role, content) {
+        function addMessage(role, content, images = []) {
             const messagesEl = document.getElementById('messages');
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}`;
@@ -478,9 +502,20 @@
                 displayContent = marked.parse(content);
             }
             
+            // Build images HTML if images are provided
+            let imagesHtml = '';
+            if (images && images.length > 0) {
+                imagesHtml = '<div class="message-images">';
+                images.forEach(imageUrl => {
+                    imagesHtml += `<img src="${imageUrl}" alt="Related image" class="message-image" onclick="window.open('${imageUrl}', '_blank')">`;
+                });
+                imagesHtml += '</div>';
+            }
+            
             messageDiv.innerHTML = `
                 <div class="label">${label}</div>
                 <div class="content">${displayContent}</div>
+                ${imagesHtml}
             `;
 
             messagesEl.appendChild(messageDiv);
