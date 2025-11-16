@@ -414,12 +414,17 @@ http://localhost:8000/manage
 - **Supported Formats**: TXT, MD, PDF, DOCX, PPTX, XLS/XLSX, HTML, CSV, and Images (with OCR)
 
 **🌐 Add from URL**
-- **Fetch Web Content**: Add content directly from web pages by entering a URL
-- **Automatic Text Extraction**: Extracts and cleans text content from HTML pages
-- **Link Crawling**: Optionally follow and ingest links found on the page
+- **Fetch Web Content**: Add content directly from web pages or PDF documents by entering a URL
+- **Automatic Text Extraction**: Extracts and cleans text content from HTML pages and PDF documents
+- **PDF Support**: Automatically detects and processes PDF files from URLs (same as file upload)
+- **Link Crawling**: Optionally follow and ingest links found on HTML pages
   - Enable "Follow and ingest links found on the page" to crawl multiple pages
   - Set maximum crawl depth (1-5): controls how many levels deep to follow links
   - Option to restrict crawling to the same domain only
+- **Stop Ingestion**: Cancel long-running crawl operations mid-process
+  - "Stop Ingestion" button appears when crawling multiple pages
+  - Gracefully stops after processing the current URL
+  - Preserves already-processed content
 - **Real-time Processing**: Fetches, extracts, chunks, and indexes content automatically
 - **Persistent Storage**: URLs are stored with their content and can be refreshed later
 - **Last Fetched Timestamp**: Track when content was last retrieved from each URL
@@ -474,6 +479,10 @@ Navigate to the Manage Documents page (click "Manage Documents" from the main pa
      - Set maximum crawl depth (1-5): higher = more pages
      - Choose whether to stay within the same domain
    - Click "Add URL" to fetch and process the content
+   - **Stop if needed**: If crawling takes too long:
+     - Click the "⏹️ Stop Ingestion" button that appears during crawling
+     - The operation will stop gracefully after the current URL
+     - Already-processed content will be saved
    - Wait for the success confirmation with crawling statistics
    - The URL(s) will appear in the "Uploaded Files" table with a 🌐 icon
 
@@ -668,7 +677,7 @@ curl -X DELETE "http://localhost:8000/documents/file/my%20document.pdf"
 
 ### 6. Upload from URL
 
-Fetch and ingest content from a web page:
+Fetch and ingest content from a web page or PDF document:
 
 **Basic usage (single page):**
 ```bash
@@ -719,18 +728,33 @@ curl -X POST "http://localhost:8000/documents/upload-url" \
   "total_chunks": 47,
   "urls_processed": 5,
   "urls_failed": 1,
+  "cancelled": false,
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "last_fetched": "2025-11-16T15:06:46.986680",
   "error": null
 }
 ```
 
+**Response fields:**
+- `success`: Whether the operation completed successfully
+- `source_url`: The starting URL that was ingested
+- `total_chunks`: Number of text chunks created from all processed URLs
+- `urls_processed`: Number of URLs successfully crawled and processed
+- `urls_failed`: Number of URLs that failed during crawling
+- `cancelled`: True if the operation was cancelled by the user (only present when crawling)
+- `job_id`: Unique identifier for the crawling job, used for cancellation (only present when crawling with depth > 1)
+- `last_fetched`: ISO timestamp of when the content was fetched
+- `error`: Error message if the operation failed
+
 **Features:**
-- Automatically extracts text from HTML pages
-- **Link Crawling**: Follow and ingest multiple pages from a website
+- Automatically extracts text from HTML pages and PDF documents
+- **PDF Support**: Downloads and processes PDF files from URLs (application/pdf content type)
+- **Link Crawling**: Follow and ingest multiple pages from a website (HTML only)
+- **Cancellable Operations**: Long-running crawls can be stopped mid-process
 - Stores URL(s) as the source for future reference
 - Can be refreshed to get updated content
 - Supports http:// and https:// URLs
-- Domain filtering to prevent crawling external sites
+- Domain filtering to prevent crawling external sites (HTML crawling)
 - Duplicate URL detection to avoid re-processing pages
 
 ### 7. Refresh URL Content
@@ -759,6 +783,52 @@ curl -X POST "http://localhost:8000/documents/refresh-url/https%3A%2F%2Fexample.
 - Fetches fresh content from the web
 - Re-indexes the updated content
 - Updates the last_fetched timestamp
+
+### 8. Cancel URL Ingestion
+
+Stop an ongoing URL crawling operation mid-process:
+
+```bash
+curl -X POST "http://localhost:8000/documents/cancel-ingestion/{job_id}"
+```
+
+**Parameters:**
+- `job_id` (path parameter): The unique job identifier returned when starting a crawl with `follow_links=true` and `max_depth > 1`
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/documents/cancel-ingestion/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+**Response (success):**
+```json
+{
+  "success": true,
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "Cancellation requested. The operation will stop after processing the current URL."
+}
+```
+
+**Response (job not found):**
+```json
+{
+  "success": false,
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "message": "Job not found or already completed"
+}
+```
+
+**Features:**
+- **Graceful Cancellation**: Stops after the current URL is processed, not immediately
+- **Preserves Progress**: Already-processed URLs and their chunks remain in the vector store
+- **Thread-safe**: Can be called while the crawling operation is in progress
+- **Automatic Cleanup**: Job tracking is removed after cancellation or completion
+
+**Use Cases:**
+- Stop crawling when you realize a site has too many pages
+- Cancel operations that are taking longer than expected
+- Interrupt crawling if you entered the wrong URL
+- Free up resources when crawling is no longer needed
 
 ## Supported File Formats
 

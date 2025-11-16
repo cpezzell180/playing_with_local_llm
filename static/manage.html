@@ -441,6 +441,10 @@
                 <button class="btn" id="urlBtn" onclick="addFromUrl()">
                     Add URL
                 </button>
+                <button class="btn-danger" id="stopIngestionBtn" onclick="cancelIngestion()" 
+                        style="display: none;">
+                    ⏹️ Stop Ingestion
+                </button>
             </div>
             
             <!-- Crawling Options -->
@@ -507,6 +511,7 @@
 
     <script>
         let selectedFiles = [];
+        let currentJobId = null;  // Track current URL ingestion job for cancellation
         
         // Pagination and search state
         let allFiles = [];
@@ -968,6 +973,7 @@
         async function addFromUrl() {
             const urlInput = document.getElementById('urlInput');
             const urlBtn = document.getElementById('urlBtn');
+            const stopBtn = document.getElementById('stopIngestionBtn');
             const statusEl = document.getElementById('urlStatus');
             const url = urlInput.value.trim();
 
@@ -1018,6 +1024,12 @@
 
                 const data = await response.json();
 
+                // Store job_id and show stop button if this is a crawling operation
+                if (data.job_id) {
+                    currentJobId = data.job_id;
+                    stopBtn.style.display = 'block';
+                }
+
                 if (response.ok && data.success) {
                     statusEl.className = 'status-message success';
                     
@@ -1037,6 +1049,10 @@
 
                     // Refresh files list
                     setTimeout(() => loadFilesList(), 1000);
+                } else if (data.cancelled) {
+                    statusEl.className = 'status-message info';
+                    statusEl.textContent = `⏹️ Operation cancelled by user.\n\n${data.urls_processed || 0} URLs were processed before cancellation.`;
+                    statusEl.style.whiteSpace = 'pre-line';
                 } else {
                     throw new Error(data.error || data.detail || 'Failed to add URL');
                 }
@@ -1044,8 +1060,49 @@
                 statusEl.className = 'status-message error';
                 statusEl.textContent = `❌ Error: ${error.message}`;
             } finally {
+                // Hide stop button and clear job ID
+                stopBtn.style.display = 'none';
+                currentJobId = null;
+                
                 urlBtn.disabled = false;
                 urlBtn.innerHTML = originalText;
+            }
+        }
+
+        // Cancel ongoing URL ingestion
+        async function cancelIngestion() {
+            if (!currentJobId) {
+                console.warn('No active job to cancel');
+                return;
+            }
+
+            const stopBtn = document.getElementById('stopIngestionBtn');
+            const statusEl = document.getElementById('urlStatus');
+            
+            try {
+                stopBtn.disabled = true;
+                stopBtn.innerHTML = '<span class="loading"></span> Stopping...';
+                
+                const response = await fetch(`/documents/cancel-ingestion/${currentJobId}`, {
+                    method: 'POST'
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    statusEl.className = 'status-message info';
+                    statusEl.textContent = `⏹️ ${data.message}`;
+                } else {
+                    statusEl.className = 'status-message error';
+                    statusEl.textContent = `⚠️ ${data.message || 'Failed to cancel operation'}`;
+                }
+            } catch (error) {
+                console.error('Error cancelling ingestion:', error);
+                statusEl.className = 'status-message error';
+                statusEl.textContent = `❌ Error: ${error.message}`;
+            } finally {
+                stopBtn.disabled = false;
+                stopBtn.innerHTML = '⏹️ Stop Ingestion';
             }
         }
 

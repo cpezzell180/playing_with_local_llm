@@ -113,8 +113,17 @@ class UploadUrlResponse(BaseModel):
     total_chunks: int = Field(..., description="Number of chunks created")
     urls_processed: int = Field(default=0, description="Number of URLs successfully processed")
     urls_failed: int = Field(default=0, description="Number of URLs that failed to process")
+    cancelled: bool = Field(default=False, description="Whether operation was cancelled by user")
+    job_id: Optional[str] = Field(None, description="Job ID for tracking/cancellation (only for crawling operations)")
     last_fetched: Optional[str] = Field(None, description="ISO timestamp of when content was fetched")
     error: Optional[str] = Field(None, description="Error message if failed")
+
+
+class CancelResponse(BaseModel):
+    """Response model for cancellation endpoint."""
+    success: bool = Field(..., description="Whether cancellation was successful")
+    job_id: str = Field(..., description="The job ID that was cancelled")
+    message: str = Field(..., description="Status message")
 
 
 class RefreshUrlResponse(BaseModel):
@@ -418,14 +427,25 @@ def upload_url(request: UploadUrlRequest):
         # Generate unique document ID for this URL
         doc_id = f"url:{uuid.uuid4()}"
         
+        # Generate job_id for cancellable operations (crawling with depth > 1)
+        job_id = None
+        if request.follow_links and request.max_depth > 1:
+            job_id = str(uuid.uuid4())
+            logger.info(f"Generated job_id {job_id} for crawling operation")
+        
         # Ingest the URL with crawling options
         result = ingest_url(
             request.url, 
             doc_id,
             follow_links=request.follow_links,
             max_depth=request.max_depth,
-            same_domain_only=request.same_domain_only
+            same_domain_only=request.same_domain_only,
+            job_id=job_id
         )
+        
+        # Add job_id to result for response
+        if job_id:
+            result["job_id"] = job_id
         
         if result["success"]:
             logger.info(
@@ -433,6 +453,8 @@ def upload_url(request: UploadUrlRequest):
                 f"{result.get('urls_processed', 1)} URL(s) processed, "
                 f"{result['total_chunks']} chunks"
             )
+        elif result.get("cancelled", False):
+            logger.info(f"URL ingestion cancelled for {request.url}")
         else:
             logger.warning(f"Failed to ingest URL {request.url}: {result.get('error')}")
         
@@ -443,6 +465,50 @@ def upload_url(request: UploadUrlRequest):
         raise HTTPException(
             status_code=500, 
             detail=f"Failed to ingest URL: {str(e)}"
+        )
+
+
+@app.post("/documents/cancel-ingestion/{job_id}", response_model=CancelResponse)
+def cancel_ingestion(job_id: str):
+    """
+    Cancel an ongoing URL ingestion/crawling operation.
+    
+    This endpoint allows users to stop a long-running crawl operation
+    by its job ID. The operation will stop gracefully after processing
+    the current URL.
+    
+    Args:
+        job_id: The unique job identifier returned when starting the ingestion
+        
+    Returns:
+        CancelResponse with success status and message
+    """
+    logger.info(f"Received cancellation request for job {job_id}")
+    
+    try:
+        from app.cancellation import cancellation_store
+        
+        success = cancellation_store.cancel_job(job_id)
+        
+        if success:
+            logger.info(f"Successfully requested cancellation for job {job_id}")
+            return CancelResponse(
+                success=True,
+                job_id=job_id,
+                message="Cancellation requested. The operation will stop after processing the current URL."
+            )
+        else:
+            logger.warning(f"Job {job_id} not found or already completed")
+            return CancelResponse(
+                success=False,
+                job_id=job_id,
+                message="Job not found or already completed"
+            )
+    except Exception as e:
+        logger.error(f"Error cancelling job {job_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to cancel ingestion: {str(e)}"
         )
 
 

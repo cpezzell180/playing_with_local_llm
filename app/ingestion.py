@@ -1,6 +1,7 @@
 """Document ingestion and text extraction."""
 import logging
 import shutil
+import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Iterable, Set, Tuple, Optional
 from datetime import datetime
@@ -292,7 +293,7 @@ def extract_links_from_html(soup: BeautifulSoup, base_url: str) -> List[str]:
 
 def extract_text_from_url(url: str, timeout: int = 30) -> Tuple[str, List[str]]:
     """
-    Extract text and links from a web page URL.
+    Extract text and links from a web page URL or PDF document.
     
     Args:
         url: URL to fetch
@@ -300,10 +301,11 @@ def extract_text_from_url(url: str, timeout: int = 30) -> Tuple[str, List[str]]:
         
     Returns:
         Tuple of (extracted text content, list of links found on the page)
+        For PDFs, the links list will be empty.
         
     Raises:
         requests.RequestException: If fetching the URL fails
-        ValueError: If the content type is not HTML or text
+        ValueError: If the content type is not supported or text extraction fails
     """
     try:
         logger.info(f"Fetching content from URL: {url}")
@@ -317,35 +319,69 @@ def extract_text_from_url(url: str, timeout: int = 30) -> Tuple[str, List[str]]:
         
         # Check content type
         content_type = response.headers.get('content-type', '').lower()
-        if 'html' not in content_type and 'text' not in content_type:
+        
+        # Handle PDF content
+        if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
+            logger.info(f"Detected PDF content from {url}, downloading and extracting text...")
+            
+            # Create a temporary file to store the PDF
+            temp_file = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='wb', suffix='.pdf', delete=False) as temp_file:
+                    temp_file.write(response.content)
+                    temp_file_path = temp_file.name
+                
+                # Extract text from the PDF using existing function
+                text = extract_text_from_pdf(Path(temp_file_path))
+                
+                if not text or not text.strip():
+                    raise ValueError("No text content extracted from PDF")
+                
+                logger.info(f"Successfully extracted {len(text)} characters from PDF: {url}")
+                # PDFs don't have HTML links, return empty list
+                return text, []
+                
+            finally:
+                # Clean up temporary file
+                if temp_file and Path(temp_file_path).exists():
+                    try:
+                        Path(temp_file_path).unlink()
+                        logger.debug(f"Cleaned up temporary PDF file: {temp_file_path}")
+                    except Exception as cleanup_error:
+                        logger.warning(f"Failed to clean up temporary file {temp_file_path}: {cleanup_error}")
+        
+        # Handle HTML/text content
+        elif 'html' in content_type or 'text' in content_type:
+            # Parse HTML and extract text
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Extract links before removing script/style
+            links = extract_links_from_html(soup, url)
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+            
+            # Get text
+            text = soup.get_text()
+            
+            # Clean up whitespace
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+            
+            if not text or not text.strip():
+                raise ValueError("No text content extracted from URL")
+            
+            logger.info(f"Successfully extracted {len(text)} characters and {len(links)} links from {url}")
+            return text, links
+        
+        else:
+            # Unsupported content type
             raise ValueError(
                 f"Unsupported content type: {content_type}. "
-                f"Only HTML and text content types are supported."
+                f"Supported types: HTML, text, and PDF (application/pdf)."
             )
-        
-        # Parse HTML and extract text
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Extract links before removing script/style
-        links = extract_links_from_html(soup, url)
-        
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        # Get text
-        text = soup.get_text()
-        
-        # Clean up whitespace
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-        
-        if not text or not text.strip():
-            raise ValueError("No text content extracted from URL")
-        
-        logger.info(f"Successfully extracted {len(text)} characters and {len(links)} links from {url}")
-        return text, links
         
     except requests.Timeout:
         logger.error(f"Timeout while fetching URL: {url}")
@@ -362,7 +398,8 @@ def crawl_url_with_links(
     start_url: str,
     max_depth: int = 1,
     same_domain_only: bool = True,
-    timeout: int = 30
+    timeout: int = 30,
+    cancellation_event: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     Crawl a URL and optionally follow links found on the page.
@@ -372,6 +409,7 @@ def crawl_url_with_links(
         max_depth: Maximum depth to crawl (1 = only start URL, 2 = start + linked pages, etc.)
         same_domain_only: If True, only follow links within the same domain
         timeout: Request timeout in seconds for each URL
+        cancellation_event: Optional threading.Event to check for cancellation requests
         
     Returns:
         Dictionary with crawling results:
@@ -379,6 +417,7 @@ def crawl_url_with_links(
             - urls_failed: List of URLs that failed to process
             - total_text_length: Total characters extracted from all pages
             - all_texts: Dictionary mapping URL to extracted text
+            - cancelled: True if operation was cancelled
     """
     visited: Set[str] = set()
     to_visit: List[Tuple[str, int]] = [(start_url, 0)]  # (url, depth)
@@ -386,11 +425,18 @@ def crawl_url_with_links(
     urls_processed = []
     urls_failed = []
     all_texts = {}
+    cancelled = False
     
     # Parse start URL domain
     start_domain = urlparse(start_url).netloc
     
     while to_visit:
+        # Check for cancellation at the start of each iteration
+        if cancellation_event and cancellation_event.is_set():
+            logger.info(f"Crawling cancelled by user after processing {len(urls_processed)} URLs")
+            cancelled = True
+            break
+        
         current_url, current_depth = to_visit.pop(0)
         
         # Skip if already visited
@@ -435,16 +481,23 @@ def crawl_url_with_links(
     
     total_text_length = sum(len(text) for text in all_texts.values())
     
-    logger.info(
-        f"Crawling complete: {len(urls_processed)} URLs processed, "
-        f"{len(urls_failed)} failed, {total_text_length} total characters"
-    )
+    if cancelled:
+        logger.info(
+            f"Crawling cancelled: {len(urls_processed)} URLs processed before cancellation, "
+            f"{len(urls_failed)} failed, {total_text_length} total characters"
+        )
+    else:
+        logger.info(
+            f"Crawling complete: {len(urls_processed)} URLs processed, "
+            f"{len(urls_failed)} failed, {total_text_length} total characters"
+        )
     
     return {
         "urls_processed": urls_processed,
         "urls_failed": urls_failed,
         "total_text_length": total_text_length,
-        "all_texts": all_texts
+        "all_texts": all_texts,
+        "cancelled": cancelled
     }
 
 
@@ -602,7 +655,8 @@ def ingest_url(
     logical_doc_id: str,
     follow_links: bool = False,
     max_depth: int = 1,
-    same_domain_only: bool = True
+    same_domain_only: bool = True,
+    job_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Ingest content from a URL into the vector store.
@@ -614,6 +668,7 @@ def ingest_url(
         follow_links: If True, crawl and ingest linked pages
         max_depth: Maximum crawl depth (1 = only start URL, 2 = start + linked pages)
         same_domain_only: If True, only follow links within the same domain
+        job_id: Optional job ID for cancellation tracking
         
     Returns:
         Dictionary with ingestion results:
@@ -621,10 +676,17 @@ def ingest_url(
             - total_chunks: Number of chunks created
             - urls_processed: Number of URLs successfully processed
             - urls_failed: Number of URLs that failed
+            - cancelled: True if operation was cancelled
             - error: Error message if failed (optional)
             - source_url: The source URL
             - last_fetched: ISO timestamp of when content was fetched
     """
+    # Get cancellation event if job_id is provided
+    cancellation_event = None
+    if job_id:
+        from app.cancellation import cancellation_store
+        cancellation_event = cancellation_store.create_job(job_id)
+    
     try:
         # Get current timestamp
         last_fetched = datetime.utcnow().isoformat()
@@ -632,7 +694,20 @@ def ingest_url(
         if follow_links and max_depth > 1:
             # Crawl multiple URLs
             logger.info(f"Crawling {url} with max_depth={max_depth}, same_domain_only={same_domain_only}")
-            crawl_result = crawl_url_with_links(url, max_depth, same_domain_only)
+            crawl_result = crawl_url_with_links(url, max_depth, same_domain_only, cancellation_event=cancellation_event)
+            
+            # Check if operation was cancelled
+            if crawl_result.get("cancelled", False):
+                logger.info(f"URL ingestion cancelled for {url}")
+                return {
+                    "success": False,
+                    "total_chunks": 0,
+                    "urls_processed": len(crawl_result["urls_processed"]),
+                    "urls_failed": len(crawl_result["urls_failed"]),
+                    "cancelled": True,
+                    "error": "Operation cancelled by user",
+                    "source_url": url
+                }
             
             if not crawl_result["urls_processed"]:
                 return {
@@ -640,6 +715,7 @@ def ingest_url(
                     "total_chunks": 0,
                     "urls_processed": 0,
                     "urls_failed": len(crawl_result["urls_failed"]),
+                    "cancelled": False,
                     "error": "No URLs were successfully processed",
                     "source_url": url
                 }
@@ -666,6 +742,7 @@ def ingest_url(
                     "total_chunks": 0,
                     "urls_processed": len(crawl_result["urls_processed"]),
                     "urls_failed": len(crawl_result["urls_failed"]),
+                    "cancelled": False,
                     "error": "No chunks created from crawled content",
                     "source_url": url
                 }
@@ -683,6 +760,7 @@ def ingest_url(
                 "total_chunks": len(all_chunks),
                 "urls_processed": len(crawl_result["urls_processed"]),
                 "urls_failed": len(crawl_result["urls_failed"]),
+                "cancelled": False,
                 "source_url": url,
                 "last_fetched": last_fetched
             }
@@ -696,6 +774,7 @@ def ingest_url(
                     "total_chunks": 0,
                     "urls_processed": 0,
                     "urls_failed": 1,
+                    "cancelled": False,
                     "error": "No text content extracted from URL",
                     "source_url": url
                 }
@@ -709,6 +788,7 @@ def ingest_url(
                     "total_chunks": 0,
                     "urls_processed": 0,
                     "urls_failed": 1,
+                    "cancelled": False,
                     "error": "No chunks created from URL content",
                     "source_url": url
                 }
@@ -727,6 +807,7 @@ def ingest_url(
                 "total_chunks": len(chunks),
                 "urls_processed": 1,
                 "urls_failed": 0,
+                "cancelled": False,
                 "source_url": url,
                 "last_fetched": last_fetched
             }
@@ -738,9 +819,15 @@ def ingest_url(
             "total_chunks": 0,
             "urls_processed": 0,
             "urls_failed": 1,
+            "cancelled": False,
             "error": str(e),
             "source_url": url
         }
+    finally:
+        # Cleanup job from cancellation store
+        if job_id:
+            from app.cancellation import cancellation_store
+            cancellation_store.cleanup_job(job_id)
 
 
 def refresh_url_content(url: str, logical_doc_id: str) -> Dict[str, Any]:
