@@ -18,7 +18,7 @@ services:
     environment:
       # Override any .env settings if needed
       - APP_HOST=0.0.0.0
-      - APP_PORT=8000
+      - APP_PORT=9292
       - LOG_LEVEL=INFO
     restart: unless-stopped
     healthcheck:
