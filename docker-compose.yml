@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: local-rag-system
     ports:
-      - "8000:8000"
+      - "9292:9292"
     volumes:
       # Persist vector database
       - /mnt/user/appdata/llm/chroma:/app/data/chroma
