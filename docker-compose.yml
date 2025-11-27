@@ -10,11 +10,11 @@ services:
       - "8000:8000"
     volumes:
       # Persist vector database
-      - ./data/chroma:/app/data/chroma
+      - /mnt/user/appdata/your-app-name/chroma:/app/data/chroma
       # Persist uploaded documents
-      - ./data/uploads:/app/data/uploads
+      - /mnt/user/appdata/your-app-name/uploads:/app/data/uploads
       # Persist extracted images
-      - ./data/images:/app/data/images
+      - /mnt/user/appdata/your-app-name/images:/app/data/images
     environment:
       # Override any .env settings if needed
       - APP_HOST=0.0.0.0
@@ -27,6 +27,9 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd # Only if required by your application
     # Resource limits (adjust based on your system)
     deploy:
       resources:
