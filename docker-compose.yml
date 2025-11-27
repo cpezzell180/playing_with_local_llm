@@ -10,11 +10,11 @@ services:
       - "8000:8000"
     volumes:
       # Persist vector database
-      - /mnt/user/appdata/your-app-name/chroma:/app/data/chroma
+      - /mnt/user/appdata/llm/chroma:/app/data/chroma
       # Persist uploaded documents
-      - /mnt/user/appdata/your-app-name/uploads:/app/data/uploads
+      - /mnt/user/appdata/llm/uploads:/app/data/uploads
       # Persist extracted images
-      - /mnt/user/appdata/your-app-name/images:/app/data/images
+      - /mnt/user/appdata/llm/images:/app/data/images
     environment:
       # Override any .env settings if needed
       - APP_HOST=0.0.0.0
